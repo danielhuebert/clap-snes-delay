@@ -11,6 +11,8 @@
 //   Feedback   0 .. 100 %    echo regeneration (EFB)
 //   Filter     preset index  selects an 8-tap SNES FIR; loads its bytes into Tap 1..8
 //   Tap 1..8   -128 .. 127   the FIR coefficients themselves (1.7 fixed, byte/128)
+//   Echo L/R   -100 .. 100 % per-side echo level (S-DSP EVOL L/R); a negative
+//                            side inverts the echo for the classic wide trick
 //
 // The Filter selector loads a preset's bytes into the eight Tap parameters,
 // which remain freely editable afterwards (a custom FIR). See kPresets below.
@@ -157,8 +159,18 @@ enum {
   kParamMix = 1,       // percent
   kParamFeedback = 2,  // percent
   kParamFilter = 3,    // stepped: preset index into kPresets
-  kParamTap0 = 4,      // 8 FIR taps follow: ids 4..11, each -128..127 (1.7 fp)
-  kParamCount = kParamTap0 + 8,  // 12
+  kParamTap0 = 4,      // 8 FIR taps: ids 4..11, each -128..127 (1.7 fp)
+  kParamEchoL = 12,    // per-side echo level (S-DSP EVOL L), signed percent
+  kParamEchoR = 13,    // per-side echo level (S-DSP EVOL R), signed percent
+  kParamCount = 14,
+};
+
+// Display order only (param ids stay stable forever; this just sets how a host
+// lists them, so the new Echo L/R sit next to Mix rather than after the taps).
+static const clap_id kParamOrder[kParamCount] = {
+    kParamTime, kParamMix, kParamFeedback, kParamEchoL, kParamEchoR, kParamFilter,
+    kParamTap0 + 0, kParamTap0 + 1, kParamTap0 + 2, kParamTap0 + 3,
+    kParamTap0 + 4, kParamTap0 + 5, kParamTap0 + 6, kParamTap0 + 7,
 };
 
 // ---------------------------------------------------------------------------
@@ -176,6 +188,8 @@ struct SpcDelay {
   std::atomic<double> p_feedback{30.0};
   std::atomic<double> p_filter{(double)kDefaultPreset};  // selected preset
   std::atomic<double> p_tap[8];                          // FIR taps, -128..127
+  std::atomic<double> p_echo_l{100.0};  // EVOL L, signed percent (-100..100)
+  std::atomic<double> p_echo_r{100.0};  // EVOL R, signed percent (-100..100)
 
   SpcDelay() {
     for (int i = 0; i < 8; ++i)
@@ -272,6 +286,11 @@ struct SpcDelay {
     const float wetGain = std::sin(mix * 1.57079633f);  // pi/2
     const float dryGain = std::cos(mix * 1.57079633f);
 
+    // Per-side echo level (S-DSP EVOL L/R): signed, so one side can be inverted
+    // for the classic wide/anti-phase trick. Output only -- never the feedback.
+    const float echoL = (float)(p_echo_l.load(std::memory_order_relaxed) * 0.01);
+    const float echoR = (float)(p_echo_r.load(std::memory_order_relaxed) * 0.01);
+
     // Record the latest requested delay; begin a fade if idle and it moved.
     d_pending = target;
     if (!fading && d_pending != d_active) {
@@ -322,8 +341,8 @@ struct SpcDelay {
 
       if (++wpos >= maxd) wpos = 0;
 
-      outL[i] = clip1m1f(dryGain * dryL + wetGain * filtL);
-      outR[i] = clip1m1f(dryGain * dryR + wetGain * filtR);
+      outL[i] = clip1m1f(dryGain * dryL + wetGain * echoL * filtL);
+      outR[i] = clip1m1f(dryGain * dryR + wetGain * echoR * filtR);
     }
   }
 };
@@ -380,11 +399,12 @@ static uint32_t pr_count(const clap_plugin_t *) { return kParamCount; }
 static bool pr_get_info(const clap_plugin_t *, uint32_t index,
                         clap_param_info_t *info) {
   if (index >= kParamCount) return false;
+  const clap_id id = kParamOrder[index];  // stable id for this display slot
   std::memset(info, 0, sizeof(*info));
   info->flags = CLAP_PARAM_IS_AUTOMATABLE;
   info->module[0] = '\0';
   info->cookie = nullptr;
-  switch (index) {
+  switch (id) {
     case kParamTime:
       info->id = kParamTime;
       std::snprintf(info->name, sizeof(info->name), "Time");
@@ -406,6 +426,20 @@ static bool pr_get_info(const clap_plugin_t *, uint32_t index,
       info->max_value = 100.0;
       info->default_value = 30.0;
       return true;
+    case kParamEchoL:
+      info->id = kParamEchoL;
+      std::snprintf(info->name, sizeof(info->name), "Echo L");
+      info->min_value = -100.0;
+      info->max_value = 100.0;
+      info->default_value = 100.0;
+      return true;
+    case kParamEchoR:
+      info->id = kParamEchoR;
+      std::snprintf(info->name, sizeof(info->name), "Echo R");
+      info->min_value = -100.0;
+      info->max_value = 100.0;
+      info->default_value = 100.0;
+      return true;
     case kParamFilter:
       info->id = kParamFilter;
       info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
@@ -415,9 +449,9 @@ static bool pr_get_info(const clap_plugin_t *, uint32_t index,
       info->default_value = (double)kDefaultPreset;
       return true;
     default: {  // FIR taps (ids kParamTap0 .. kParamTap0+7)
-      const int i = (int)index - kParamTap0;
+      const int i = (int)id - kParamTap0;
       if (i < 0 || i > 7) return false;
-      info->id = index;
+      info->id = id;
       info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
       std::snprintf(info->name, sizeof(info->name), "Tap %d", i + 1);
       info->min_value = -128.0;
@@ -436,6 +470,8 @@ static bool pr_get_value(const clap_plugin_t *plugin, clap_id id,
     case kParamMix: *out = self->p_mix.load(); return true;
     case kParamFeedback: *out = self->p_feedback.load(); return true;
     case kParamFilter: *out = self->p_filter.load(); return true;
+    case kParamEchoL: *out = self->p_echo_l.load(); return true;
+    case kParamEchoR: *out = self->p_echo_r.load(); return true;
     default:
       if ((int)id >= kParamTap0 && (int)id <= kParamTap0 + 7) {
         *out = self->p_tap[(int)id - kParamTap0].load();
@@ -450,7 +486,9 @@ static bool pr_value_to_text(const clap_plugin_t *, clap_id id, double value,
   switch (id) {
     case kParamTime: std::snprintf(out, cap, "%.0f ms", value); return true;
     case kParamMix:
-    case kParamFeedback: std::snprintf(out, cap, "%.0f %%", value); return true;
+    case kParamFeedback:
+    case kParamEchoL:
+    case kParamEchoR: std::snprintf(out, cap, "%.0f %%", value); return true;
     case kParamFilter: {
       int idx = (int)std::lround(value);
       if (idx < 0) idx = 0;
@@ -518,6 +556,8 @@ static void applyParamEvent(SpcDelay *self, const clap_event_param_value_t *ev,
   if (id == kParamTime) { self->p_time_ms.store(ev->value); return; }
   if (id == kParamMix) { self->p_mix.store(ev->value); return; }
   if (id == kParamFeedback) { self->p_feedback.store(ev->value); return; }
+  if (id == kParamEchoL) { self->p_echo_l.store(ev->value); return; }
+  if (id == kParamEchoR) { self->p_echo_r.store(ev->value); return; }
   if (id == kParamFilter) {
     int idx = (int)std::lround(ev->value);
     if (idx < 0) idx = 0;
@@ -561,7 +601,7 @@ static const clap_plugin_params_t s_params = {
 // state extension — serialize all plain parameter values
 // ---------------------------------------------------------------------------
 
-static const uint32_t kStateMagic = 0x53504332;  // 'SPC2'
+static const uint32_t kStateMagic = 0x53504333;  // 'SPC3'
 
 static bool writeAll(const clap_ostream_t *os, const void *p, uint64_t n) {
   const uint8_t *b = (const uint8_t *)p;
@@ -585,16 +625,19 @@ static bool readAll(const clap_istream_t *is, void *p, uint64_t n) {
   return true;
 }
 
-// Layout: magic, then 12 doubles: time, mix, feedback, filter, tap0..tap7.
+// Layout: magic, then 14 doubles: time, mix, feedback, filter, tap0..tap7,
+// echoL, echoR.
 static bool st_save(const clap_plugin_t *plugin, const clap_ostream_t *os) {
   auto *self = (SpcDelay *)plugin->plugin_data;
   uint32_t magic = kStateMagic;
-  double vals[12];
+  double vals[14];
   vals[0] = self->p_time_ms.load();
   vals[1] = self->p_mix.load();
   vals[2] = self->p_feedback.load();
   vals[3] = self->p_filter.load();
   for (int i = 0; i < 8; ++i) vals[4 + i] = self->p_tap[i].load();
+  vals[12] = self->p_echo_l.load();
+  vals[13] = self->p_echo_r.load();
   return writeAll(os, &magic, sizeof(magic)) &&
          writeAll(os, vals, sizeof(vals));
 }
@@ -602,7 +645,7 @@ static bool st_save(const clap_plugin_t *plugin, const clap_ostream_t *os) {
 static bool st_load(const clap_plugin_t *plugin, const clap_istream_t *is) {
   auto *self = (SpcDelay *)plugin->plugin_data;
   uint32_t magic = 0;
-  double vals[12] = {0};
+  double vals[14] = {0};
   if (!readAll(is, &magic, sizeof(magic)) || magic != kStateMagic) return false;
   if (!readAll(is, vals, sizeof(vals))) return false;
   self->p_time_ms.store(std::clamp(vals[0], kMinDelayMs, kMaxDelayMs));
@@ -611,6 +654,8 @@ static bool st_load(const clap_plugin_t *plugin, const clap_istream_t *is) {
   self->p_filter.store(std::clamp(vals[3], 0.0, (double)(kNumPresets - 1)));
   for (int i = 0; i < 8; ++i)
     self->p_tap[i].store(std::clamp(vals[4 + i], -128.0, 127.0));
+  self->p_echo_l.store(std::clamp(vals[12], -100.0, 100.0));
+  self->p_echo_r.store(std::clamp(vals[13], -100.0, 100.0));
   self->recomputeFir();
   return true;
 }

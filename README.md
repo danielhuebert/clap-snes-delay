@@ -12,11 +12,21 @@ and non-interleaved `float**` buffers, with a selectable/editable FIR filter.
 | Time      | 16 … 480 ms  | EDL (16 ms/step) | delay length; changes crossfade (click- and glide-free) |
 | Mix       | 0 … 100 %    | EVOL          | equal-power dry/wet crossfade (0 % dry, 100 % wet) |
 | Feedback  | 0 … 100 %    | EFB           | echo regeneration |
+| Echo L    | −100 … 100 % | EVOL(L)       | left echo level; negative inverts that side |
+| Echo R    | −100 … 100 % | EVOL(R)       | right echo level; negative inverts that side |
 | Filter    | preset list  | FIR preset    | selects an 8-tap SNES FIR, loading it into Tap 1…8 |
 | Tap 1…8   | −128 … 127   | FIR[0]…FIR[7] | the FIR coefficients (1.7 fixed point, byte ÷ 128) |
 
 All parameters are host-automatable; plugin state (all values, including the
 eight taps) is saved and restored via the `clap.state` extension.
+
+**Stereo (Echo L / Echo R):** the S-DSP had a separate, signed echo volume per
+side (EVOL L/R), so the echo could be panned or placed in the stereo field, and
+inverting one side (negative volume) produces a wide, anti-phase echo. Echo L/R
+reproduce this; they affect the output only, never the feedback loop. At the
+default +100 / +100 both sides are equal (mono-compatible); set one side
+negative for the classic wide trick. Delay time, feedback and the FIR are shared
+across both channels, exactly as on the hardware.
 
 ## FIR filter & presets
 
