@@ -7,7 +7,7 @@
 //
 // Parameters (host-automatable):
 //   Time      16 .. 480 ms   (SNES EDL, 16 ms per step)
-//   Mix        0 .. 100 %    wet amount added to the dry signal (EVOL)
+//   Mix        0 .. 100 %    equal-power dry/wet crossfade (0% dry, 100% wet)
 //   Feedback   0 .. 100 %    echo regeneration (EFB); stable because FIR gain < 1
 //
 // Build: see CMakeLists.txt or build.sh. Output is a `.clap` bundle on macOS.
@@ -145,6 +145,12 @@ struct SpcDelay {
     const float fb = (float)(p_feedback.load(std::memory_order_relaxed) * 0.01);
     const uint32_t maxd = max_delay;
 
+    // Equal-power dry/wet crossfade (standard DAW behaviour, not the SNES's
+    // additive EVOL): 0% = dry only, 100% = wet only, constant perceived
+    // loudness across the range. Feedback is unaffected -- Mix is output only.
+    const float wetGain = std::sin(mix * 1.57079633f);  // pi/2
+    const float dryGain = std::cos(mix * 1.57079633f);
+
     // Record the latest requested delay; begin a fade if idle and it moved.
     d_pending = target;
     if (!fading && d_pending != d_active) {
@@ -195,8 +201,8 @@ struct SpcDelay {
 
       if (++wpos >= maxd) wpos = 0;
 
-      outL[i] = clip1m1f(dryL + mix * filtL);
-      outR[i] = clip1m1f(dryR + mix * filtR);
+      outL[i] = clip1m1f(dryGain * dryL + wetGain * filtL);
+      outR[i] = clip1m1f(dryGain * dryR + wetGain * filtR);
     }
   }
 };

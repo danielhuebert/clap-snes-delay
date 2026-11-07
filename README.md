@@ -10,7 +10,7 @@ variable sample rate and non-interleaved `float**` buffers.
 | Parameter | Range        | SNES analogue | Notes |
 |-----------|--------------|---------------|-------|
 | Time      | 16 … 480 ms  | EDL (16 ms/step) | delay length |
-| Mix       | 0 … 100 %    | EVOL          | wet echo added to the dry signal |
+| Mix       | 0 … 100 %    | EVOL          | equal-power dry/wet crossfade (0 % dry, 100 % wet) |
 | Feedback  | 0 … 100 %    | EFB           | echo regeneration (stable; FIR gain ≈ 0.77) |
 
 All three are host-automatable; plugin state (the three values) is saved and
