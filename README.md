@@ -71,6 +71,25 @@ is **Doom** (the original minilogue sound). Included presets:
 
 See the wiki for each filter's frequency-response description.
 
+## Download (prebuilt, macOS)
+
+Grab `SPC-Echo-<version>-macOS-universal.clap.zip` from the
+[latest release](https://github.com/danielhuebert/clap-snes-delay/releases),
+then:
+
+```sh
+unzip SPC-Echo-*-macOS-universal.clap.zip
+xattr -dr com.apple.quarantine "SPC Echo.clap"      # clear the download quarantine
+cp -R "SPC Echo.clap" ~/Library/Audio/Plug-Ins/CLAP/
+```
+
+Restart your DAW (or rescan plugins) afterwards. The bundle is a universal
+(arm64 + x86_64) build, **ad-hoc signed but not notarized** — notarization needs
+a paid Apple Developer account. The one-time `xattr` step tells macOS Gatekeeper
+to allow the plugin; on Apple Silicon the ad-hoc signature is enough for the DAW
+to load it once the quarantine flag is gone. Building from source (below) avoids
+the quarantine altogether.
+
 ## Build
 
 ### Quick build (clang only, no CMake)
@@ -112,7 +131,16 @@ clap-validator validate "build/SPC Echo.clap"
 
 ```
 src/spc_delay.cpp   the whole plugin: entry, factory, DSP, params, state
+test/test_host.cpp  standalone CLAP host harness (dlopen) — regression checks
 build.sh            clang-only bundle build
 CMakeLists.txt      idiomatic alternative build
+ROADMAP.md          project status, design decisions, next steps
 deps/clap/          CLAP headers (fetched, git-ignored)
+```
+
+Run the harness:
+
+```sh
+clang++ -std=c++17 -O2 -Ideps/clap/include test/test_host.cpp -o /tmp/spc_test
+/tmp/spc_test "build/SPC Echo.clap/Contents/MacOS/SPC Echo"
 ```
