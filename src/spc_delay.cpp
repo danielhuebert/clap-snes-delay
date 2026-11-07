@@ -8,7 +8,12 @@
 // Parameters (host-automatable):
 //   Time      16 .. 480 ms   (SNES EDL, 16 ms per step)
 //   Mix        0 .. 100 %    equal-power dry/wet crossfade (0% dry, 100% wet)
-//   Feedback   0 .. 100 %    echo regeneration (EFB); stable because FIR gain < 1
+//   Feedback   0 .. 100 %    echo regeneration (EFB)
+//   Filter     preset index  selects an 8-tap SNES FIR; loads its bytes into Tap 1..8
+//   Tap 1..8   -128 .. 127   the FIR coefficients themselves (1.7 fixed, byte/128)
+//
+// The Filter selector loads a preset's bytes into the eight Tap parameters,
+// which remain freely editable afterwards (a custom FIR). See kPresets below.
 //
 // Build: see CMakeLists.txt or build.sh. Output is a `.clap` bundle on macOS.
 
@@ -27,12 +32,109 @@
 // DSP constants (identical to the minilogue xd original)
 // ---------------------------------------------------------------------------
 
-// EarthBound / DOOM SNES FIR coefficients.
-// Raw signed int8 bytes FA 0A 1A 13 13 1A 0A FA, scaled by 1/128.
-// tap[0] = oldest delayed sample, tap[7] = newest. Summed gain ~= 0.77.
-static const float k_fir[8] = {
-    -6.f / 128.f, 10.f / 128.f, 26.f / 128.f, 19.f / 128.f,
-    19.f / 128.f, 26.f / 128.f, 10.f / 128.f, -6.f / 128.f};
+// SNES FIR filter presets, from https://sneslab.net/wiki/FIR_Filter
+//
+// The S-DSP echo path runs an 8-tap FIR over the delayed signal. Each tap is a
+// signed 1.7 fixed-point byte: 0x00..0x7F = 0..+127, 0x80..0xFF = -128..-1, and
+// the coefficient is the byte / 128 (0x7F ~= +1.0, 0x80 = -1.0). Byte order is
+// FIR[0]..FIR[7] where FIR[0] multiplies the oldest delayed sample. That maps
+// directly onto our tap[0]=oldest .. tap[7]=newest history.
+//
+// Gain note (sneslab): for click-free, stable echo the absolute sum of the taps
+// should not exceed 128 (0 dB); above that, loud feedback can make the echo
+// overflow/"explode". Here the feedback write is hard-clipped to [-1, 1], so a
+// hot filter saturates (SNES-style) instead of blowing up. Many of these presets
+// still have gain > 0 dB -- use them with moderate Feedback.
+//
+// Index 0 is the default (Doom), so a fresh instance keeps the original sound.
+struct FirPreset {
+  const char *name;
+  uint8_t b[8];  // raw SNES bytes, FIR[0]=oldest .. FIR[7]=newest
+};
+
+static const FirPreset kPresets[] = {
+    {"Doom (default)", {0xFA, 0x0A, 0x1A, 0x13, 0x13, 0x1A, 0x0A, 0xFA}},
+    // --- N-SPC built-in filters ---
+    {"NSPC Identity", {0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+    {"NSPC HP 3kHz", {0x58, 0xBF, 0xDB, 0xF0, 0xFE, 0x07, 0x0C, 0x0C}},
+    {"NSPC LP 5kHz", {0x0C, 0x21, 0x2B, 0x2B, 0x13, 0xFE, 0xF3, 0xF9}},
+    {"NSPC BP 1.5-8.5kHz", {0x34, 0x33, 0x00, 0xD9, 0xE5, 0x01, 0xFC, 0xEB}},
+    // --- Low-pass ---
+    {"LP BioMetal 5kHz", {0x00, 0x23, 0x1E, 0x14, 0x0A, 0x00, 0x00, 0x00}},
+    {"LP Clue 2kHz", {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x60}},
+    {"LP DragonQuest 4kHz", {0xFF, 0x07, 0x16, 0x23, 0x23, 0x16, 0x07, 0xFE}},
+    {"LP DragonQuest3 3kHz", {0x10, 0x22, 0x24, 0x20, 0x28, 0xF8, 0xF8, 0xF8}},
+    {"LP DragonQuest6 2.5kHz", {0x06, 0x08, 0x08, 0x08, 0x10, 0x20, 0x20, 0x20}},
+    {"LP DragonQuest6 5kHz", {0x0B, 0x21, 0x20, 0x20, 0x10, 0xFC, 0xFB, 0xFF}},
+    {"LP DragonQuest6 6kHz", {0x0B, 0x21, 0x28, 0x28, 0x18, 0xF2, 0xF0, 0xF0}},
+    {"LP EarthwormJim2 3kHz", {0x00, 0x00, 0x14, 0x26, 0x26, 0x10, 0x08, 0x08}},
+    {"LP JusticeLeague 3kHz", {0x48, 0x20, 0x12, 0x0C, 0x00, 0x00, 0x00, 0x00}},
+    {"LP KyuuyakuMegami 6kHz", {0x0B, 0x21, 0x28, 0x28, 0x18, 0xFC, 0xFB, 0xF7}},
+    {"LP MagicBoy 4kHz", {0xFF, 0x05, 0x13, 0x20, 0x20, 0x13, 0x05, 0xFF}},
+    {"LP Chrono/ManyGames 5kHz", {0x0C, 0x21, 0x2B, 0x2B, 0x13, 0xFE, 0xF3, 0xF9}},
+    {"LP ManyGames 5kHz b", {0xFF, 0x08, 0x17, 0x24, 0x24, 0x17, 0x08, 0xFF}},
+    {"LP MomotarouHappy 3kHz", {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}},
+    {"LP SolidRunner 4kHz", {0x0B, 0x21, 0x22, 0x23, 0x12, 0xFC, 0xFB, 0xF7}},
+    {"LP SolidRunner 5kHz", {0x0B, 0x21, 0x22, 0x25, 0x15, 0xF9, 0xF5, 0xF4}},
+    {"LP StrikeGunner 5kHz", {0x20, 0x40, 0x20, 0x10, 0x00, 0x00, 0x00, 0x00}},
+    {"LP SuperBomberman5 12kHz", {0x04, 0xF9, 0xF8, 0x27, 0x27, 0xF8, 0xF9, 0x04}},
+    {"LP TreasureHunterG 5kHz", {0x0B, 0x21, 0x22, 0x22, 0x12, 0xFE, 0xF5, 0xF8}},
+    {"LP UFOKamen 5kHz", {0xFF, 0x08, 0x17, 0x24, 0x24, 0x00, 0x00, 0x00}},
+    {"LP ZenkiTenchi 6kHz", {0xFE, 0xFD, 0x16, 0x34, 0x34, 0x16, 0xFD, 0xFC}},
+    // --- High-pass ---
+    {"HP BobbysWorld 10kHz", {0x18, 0xE8, 0x0C, 0xF4, 0x0C, 0xF4, 0x0C, 0xF4}},
+    {"HP BattleCross 1.5kHz", {0x3F, 0xA9, 0x14, 0x54, 0xEC, 0x14, 0xFC, 0xAB}},
+    {"HP DKC2 3kHz", {0x58, 0xBF, 0xDB, 0xE0, 0xFE, 0x01, 0x2C, 0x2C}},
+    {"HP G.O.D 2kHz", {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80}},
+    {"HP ManyGames 3kHz", {0x58, 0xBF, 0xDB, 0xF0, 0xFE, 0x07, 0x0C, 0x0C}},
+    {"HP Terranigma 1.5kHz", {0x5F, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9}},
+    // --- Band-pass ---
+    {"BP ManyGames 1.5-8.5kHz", {0x34, 0x33, 0x00, 0xD9, 0xE5, 0x01, 0xFC, 0xEB}},
+    {"BP PopfulMail 3-10kHz", {0x00, 0xFF, 0xEE, 0xB8, 0x06, 0x20, 0x01, 0xFF}},
+    // --- Band-stop ---
+    {"BS ChaosSeed 5-14kHz", {0xFF, 0x40, 0x20, 0x20, 0x00, 0x00, 0x00, 0x00}},
+    {"BS DoReMi 4-12kHz", {0x00, 0x00, 0x00, 0x00, 0x48, 0x00, 0x30, 0x00}},
+    {"BS ManyGames 6-12kHz", {0x0C, 0x21, 0x2B, 0x2B, 0xF3, 0xFE, 0xF3, 0xF9}},
+    {"BS PopfulMail 4-10kHz", {0x08, 0xFF, 0xE0, 0xB8, 0x04, 0x80, 0x09, 0xFF}},
+    {"BS SuperBomberman3 a", {0x00, 0x00, 0x00, 0x28, 0x00, 0x28, 0x00, 0xFE}},
+    {"BS SuperBomberman3 b", {0x00, 0x00, 0x00, 0x40, 0x00, 0x28, 0x00, 0xFE}},
+    {"BS TengaiMakyouZero 4-12kHz", {0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x48, 0x00}},
+    // --- Unusual / FX ---
+    {"FX AlienVsPredator", {0x0C, 0x2B, 0x2B, 0x2B, 0x28, 0xFF, 0xF8, 0xF9}},
+    {"FX Angelique", {0x0D, 0xF5, 0xFA, 0x12, 0x12, 0xFA, 0xF5, 0x0D}},
+    {"FX B.O.B", {0x18, 0x0C, 0xF4, 0x0C, 0xF4, 0x0C, 0xF4, 0x00}},
+    {"FX DKC2 W-shape", {0x50, 0xBF, 0xDB, 0xE0, 0xE0, 0x0A, 0xC8, 0xC8}},
+    {"FX DKC mute", {0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+    {"FX DragonQuest6 twistW", {0x0D, 0x10, 0x10, 0x24, 0x3D, 0xF4, 0xF4, 0xF4}},
+    {"FX DragonQuest6 W", {0x10, 0x08, 0x14, 0x14, 0x14, 0xFE, 0xFE, 0xFE}},
+    {"FX DragonQuest6 W2", {0x30, 0x0C, 0x44, 0x0C, 0x54, 0x0C, 0xB4, 0x0C}},
+    {"FX JimPower", {0xFF, 0xFC, 0xFD, 0xFE, 0xFF, 0xFE, 0xFD, 0xFC}},
+    {"FX KamaitachiNoYoru", {0xFF, 0x0A, 0x1E, 0x32, 0x32, 0x1E, 0x0A, 0xFF}},
+    {"FX KamenRiderSD", {0x20, 0x06, 0x10, 0x16, 0x16, 0x06, 0x08, 0x20}},
+    {"FX ManyGames bandstop", {0x10, 0x30, 0x22, 0x24, 0x11, 0xF0, 0x20, 0xFF}},
+    {"FX ManyGames HPdrop", {0x3F, 0xD8, 0x00, 0xD9, 0xE5, 0x01, 0x6F, 0xEB}},
+    {"FX MarioIsMissing", {0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A}},
+    {"FX MomotarouHappy a", {0x10, 0x20, 0x60, 0x30, 0x55, 0x17, 0x80, 0x01}},
+    {"FX MomotarouHappy b", {0x60, 0x20, 0x60, 0x30, 0x55, 0x17, 0x80, 0x01}},
+    {"FX MonsterMaker3", {0x21, 0x00, 0x23, 0x00, 0x25, 0x00, 0x27, 0x00}},
+    {"FX PopfulMail twistW", {0x06, 0xB0, 0x07, 0xFF, 0xEB, 0xB8, 0x0E, 0x00}},
+    {"FX PrinceOfPersia2", {0x0F, 0x08, 0x86, 0x08, 0x0B, 0x09, 0x90, 0x09}},
+    {"FX SeikenDensetsu3", {0x20, 0x0C, 0x10, 0x0C, 0x20, 0x0C, 0x0C, 0x0C}},
+    {"FX SengokuDenshou", {0x65, 0x09, 0xF4, 0x09, 0x8C, 0x0A, 0x2C, 0x0B}},
+    {"FX StarOcean/ToP", {0x0D, 0x22, 0x22, 0x24, 0x11, 0xF0, 0x03, 0xFF}},
+    {"FX SuperGenjin2", {0x00, 0x00, 0x00, 0x36, 0x00, 0x28, 0x00, 0x41}},
+    {"FX SuperMadChamp", {0x34, 0x33, 0x00, 0xD9, 0xE5, 0x01, 0xFC, 0x00}},
+    {"FX SuperTekkyuuFight", {0x0E, 0x49, 0x4B, 0x46, 0x5F, 0x08, 0xDE, 0x08}},
+    {"FX TacticsOgre", {0x44, 0x0C, 0x46, 0x0C, 0x75, 0x0C, 0xC4, 0x0C}},
+    {"FX Flintstones (XX=7F)", {0x7F, 0x33, 0x00, 0xD9, 0xE5, 0x01, 0xFC, 0xEB}},
+    {"FX TheMask a", {0xFA, 0x02, 0x18, 0x28, 0x2A, 0xF4, 0x0A, 0x1E}},
+    {"FX TheMask b", {0x30, 0x1A, 0x04, 0xF4, 0xF8, 0x04, 0x0A, 0x0C}},
+    {"FX Simpsons a", {0x00, 0x08, 0x10, 0x10, 0x10, 0x10, 0x08, 0x00}},
+    {"FX Simpsons b", {0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18}},
+    {"FX WWFWrestlemania", {0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13}},
+};
+static const int kNumPresets = (int)(sizeof(kPresets) / sizeof(kPresets[0]));
+static const int kDefaultPreset = 0;  // Doom
 
 static constexpr double kMinDelayMs = 16.0;   // SNES minimum (one EDL step)
 static constexpr double kMaxDelayMs = 480.0;  // SNES maximum (EDL = 15)
@@ -54,7 +156,9 @@ enum {
   kParamTime = 0,      // ms
   kParamMix = 1,       // percent
   kParamFeedback = 2,  // percent
-  kParamCount = 3,
+  kParamFilter = 3,    // stepped: preset index into kPresets
+  kParamTap0 = 4,      // 8 FIR taps follow: ids 4..11, each -128..127 (1.7 fp)
+  kParamCount = kParamTap0 + 8,  // 12
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +174,14 @@ struct SpcDelay {
   std::atomic<double> p_time_ms{100.0};
   std::atomic<double> p_mix{50.0};
   std::atomic<double> p_feedback{30.0};
+  std::atomic<double> p_filter{(double)kDefaultPreset};  // selected preset
+  std::atomic<double> p_tap[8];                          // FIR taps, -128..127
+
+  SpcDelay() {
+    for (int i = 0; i < 8; ++i)
+      p_tap[i].store((double)(int8_t)kPresets[kDefaultPreset].b[i]);
+    recomputeFir();
+  }
 
   // Processing state (only touched on the audio thread once active).
   double sample_rate = 48000.0;
@@ -90,11 +202,19 @@ struct SpcDelay {
 
   float fir_l[8] = {0};      // FIR history, [0]=oldest .. [7]=newest
   float fir_r[8] = {0};
+  float fir_coeff[8] = {0};  // live coefficients = tap bytes / 128
+
+  // Rebuild the float coefficients from the current tap parameters.
+  void recomputeFir() {
+    for (int i = 0; i < 8; ++i)
+      fir_coeff[i] = (float)(p_tap[i].load(std::memory_order_relaxed) / 128.0);
+  }
 
   // ----- DSP helpers -----
-  static inline float fir_apply(const float h[8]) {
-    return h[0] * k_fir[0] + h[1] * k_fir[1] + h[2] * k_fir[2] + h[3] * k_fir[3] +
-           h[4] * k_fir[4] + h[5] * k_fir[5] + h[6] * k_fir[6] + h[7] * k_fir[7];
+  inline float fir_apply(const float h[8]) const {
+    return h[0] * fir_coeff[0] + h[1] * fir_coeff[1] + h[2] * fir_coeff[2] +
+           h[3] * fir_coeff[3] + h[4] * fir_coeff[4] + h[5] * fir_coeff[5] +
+           h[6] * fir_coeff[6] + h[7] * fir_coeff[7];
   }
   static inline void fir_push(float h[8], float v) {
     h[0] = h[1]; h[1] = h[2]; h[2] = h[3]; h[3] = h[4];
@@ -117,6 +237,7 @@ struct SpcDelay {
     std::fill(buf_l.begin(), buf_l.end(), 0.f);
     std::fill(buf_r.begin(), buf_r.end(), 0.f);
     for (int i = 0; i < 8; ++i) fir_l[i] = fir_r[i] = 0.f;
+    recomputeFir();
     wpos = 0;
     d_active = d_from = d_to = d_pending = delayTarget();
     fade_gain = 1.f;
@@ -285,8 +406,26 @@ static bool pr_get_info(const clap_plugin_t *, uint32_t index,
       info->max_value = 100.0;
       info->default_value = 30.0;
       return true;
+    case kParamFilter:
+      info->id = kParamFilter;
+      info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
+      std::snprintf(info->name, sizeof(info->name), "Filter");
+      info->min_value = 0.0;
+      info->max_value = (double)(kNumPresets - 1);
+      info->default_value = (double)kDefaultPreset;
+      return true;
+    default: {  // FIR taps (ids kParamTap0 .. kParamTap0+7)
+      const int i = (int)index - kParamTap0;
+      if (i < 0 || i > 7) return false;
+      info->id = index;
+      info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
+      std::snprintf(info->name, sizeof(info->name), "Tap %d", i + 1);
+      info->min_value = -128.0;
+      info->max_value = 127.0;
+      info->default_value = (double)(int8_t)kPresets[kDefaultPreset].b[i];
+      return true;
+    }
   }
-  return false;
 }
 
 static bool pr_get_value(const clap_plugin_t *plugin, clap_id id,
@@ -296,6 +435,12 @@ static bool pr_get_value(const clap_plugin_t *plugin, clap_id id,
     case kParamTime: *out = self->p_time_ms.load(); return true;
     case kParamMix: *out = self->p_mix.load(); return true;
     case kParamFeedback: *out = self->p_feedback.load(); return true;
+    case kParamFilter: *out = self->p_filter.load(); return true;
+    default:
+      if ((int)id >= kParamTap0 && (int)id <= kParamTap0 + 7) {
+        *out = self->p_tap[(int)id - kParamTap0].load();
+        return true;
+      }
   }
   return false;
 }
@@ -306,35 +451,105 @@ static bool pr_value_to_text(const clap_plugin_t *, clap_id id, double value,
     case kParamTime: std::snprintf(out, cap, "%.0f ms", value); return true;
     case kParamMix:
     case kParamFeedback: std::snprintf(out, cap, "%.0f %%", value); return true;
+    case kParamFilter: {
+      int idx = (int)std::lround(value);
+      if (idx < 0) idx = 0;
+      if (idx >= kNumPresets) idx = kNumPresets - 1;
+      std::snprintf(out, cap, "%s", kPresets[idx].name);
+      return true;
+    }
+    default:
+      if ((int)id >= kParamTap0 && (int)id <= kParamTap0 + 7) {
+        const int iv = (int)std::lround(value);
+        std::snprintf(out, cap, "%d (0x%02X)", iv, (uint8_t)(int8_t)iv);
+        return true;
+      }
   }
   return false;
 }
 
-static bool pr_text_to_value(const clap_plugin_t *, clap_id, const char *text,
-                             double *out) {
+static bool pr_text_to_value(const clap_plugin_t *, clap_id id,
+                             const char *text, double *out) {
   if (!text) return false;
+  if (id == kParamFilter) {
+    long v = std::strtol(text, nullptr, 0);
+    if (v < 0) v = 0;
+    if (v >= kNumPresets) v = kNumPresets - 1;
+    *out = (double)v;
+    return true;
+  }
+  if ((int)id >= kParamTap0 && (int)id <= kParamTap0 + 7) {
+    long v = std::strtol(text, nullptr, 0);  // accepts decimal and 0x.. hex
+    if (v > 127 && v <= 255) v -= 256;        // allow 0xFA to mean -6
+    if (v < -128) v = -128;
+    if (v > 127) v = 127;
+    *out = (double)v;
+    return true;
+  }
   *out = std::atof(text);
   return true;
 }
 
-// Apply a single incoming parameter-value event.
-static void applyParamEvent(SpcDelay *self, const clap_event_param_value_t *ev) {
-  switch (ev->param_id) {
-    case kParamTime: self->p_time_ms.store(ev->value); break;
-    case kParamMix: self->p_mix.store(ev->value); break;
-    case kParamFeedback: self->p_feedback.store(ev->value); break;
+// Emit a parameter-value change to the host (used when the Filter preset loads
+// new tap values, so the host's knobs/automation stay in sync).
+static void pushParam(const clap_output_events_t *out, clap_id id, double value,
+                      uint32_t time) {
+  if (!out) return;
+  clap_event_param_value_t e;
+  std::memset(&e, 0, sizeof(e));
+  e.header.size = sizeof(e);
+  e.header.time = time;
+  e.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+  e.header.type = CLAP_EVENT_PARAM_VALUE;
+  e.param_id = id;
+  e.note_id = -1;
+  e.port_index = -1;
+  e.channel = -1;
+  e.key = -1;
+  e.value = value;
+  out->try_push(out, &e.header);
+}
+
+// Apply one incoming parameter-value event. `out`/`time` let a Filter change
+// write the resulting tap values back to the host.
+static void applyParamEvent(SpcDelay *self, const clap_event_param_value_t *ev,
+                            const clap_output_events_t *out, uint32_t time) {
+  const clap_id id = ev->param_id;
+  if (id == kParamTime) { self->p_time_ms.store(ev->value); return; }
+  if (id == kParamMix) { self->p_mix.store(ev->value); return; }
+  if (id == kParamFeedback) { self->p_feedback.store(ev->value); return; }
+  if (id == kParamFilter) {
+    int idx = (int)std::lround(ev->value);
+    if (idx < 0) idx = 0;
+    if (idx >= kNumPresets) idx = kNumPresets - 1;
+    self->p_filter.store((double)idx);
+    for (int i = 0; i < 8; ++i) {
+      const double v = (double)(int8_t)kPresets[idx].b[i];
+      self->p_tap[i].store(v);
+      pushParam(out, kParamTap0 + i, v, time);  // keep the host in sync
+    }
+    self->recomputeFir();
+    return;
+  }
+  if ((int)id >= kParamTap0 && (int)id <= kParamTap0 + 7) {
+    double v = ev->value;
+    if (v < -128.0) v = -128.0;
+    if (v > 127.0) v = 127.0;
+    self->p_tap[(int)id - kParamTap0].store(v);
+    self->recomputeFir();
+    return;
   }
 }
 
 static void pr_flush(const clap_plugin_t *plugin, const clap_input_events_t *in,
-                     const clap_output_events_t *) {
+                     const clap_output_events_t *out) {
   auto *self = (SpcDelay *)plugin->plugin_data;
   const uint32_t n = in->size(in);
   for (uint32_t i = 0; i < n; ++i) {
     const clap_event_header_t *h = in->get(in, i);
     if (h->space_id == CLAP_CORE_EVENT_SPACE_ID &&
         h->type == CLAP_EVENT_PARAM_VALUE)
-      applyParamEvent(self, (const clap_event_param_value_t *)h);
+      applyParamEvent(self, (const clap_event_param_value_t *)h, out, 0);
   }
 }
 
@@ -343,10 +558,10 @@ static const clap_plugin_params_t s_params = {
     pr_value_to_text, pr_text_to_value, pr_flush};
 
 // ---------------------------------------------------------------------------
-// state extension — serialize the three plain parameter values
+// state extension — serialize all plain parameter values
 // ---------------------------------------------------------------------------
 
-static const uint32_t kStateMagic = 0x53504331;  // 'SPC1'
+static const uint32_t kStateMagic = 0x53504332;  // 'SPC2'
 
 static bool writeAll(const clap_ostream_t *os, const void *p, uint64_t n) {
   const uint8_t *b = (const uint8_t *)p;
@@ -370,11 +585,16 @@ static bool readAll(const clap_istream_t *is, void *p, uint64_t n) {
   return true;
 }
 
+// Layout: magic, then 12 doubles: time, mix, feedback, filter, tap0..tap7.
 static bool st_save(const clap_plugin_t *plugin, const clap_ostream_t *os) {
   auto *self = (SpcDelay *)plugin->plugin_data;
   uint32_t magic = kStateMagic;
-  double vals[3] = {self->p_time_ms.load(), self->p_mix.load(),
-                    self->p_feedback.load()};
+  double vals[12];
+  vals[0] = self->p_time_ms.load();
+  vals[1] = self->p_mix.load();
+  vals[2] = self->p_feedback.load();
+  vals[3] = self->p_filter.load();
+  for (int i = 0; i < 8; ++i) vals[4 + i] = self->p_tap[i].load();
   return writeAll(os, &magic, sizeof(magic)) &&
          writeAll(os, vals, sizeof(vals));
 }
@@ -382,12 +602,16 @@ static bool st_save(const clap_plugin_t *plugin, const clap_ostream_t *os) {
 static bool st_load(const clap_plugin_t *plugin, const clap_istream_t *is) {
   auto *self = (SpcDelay *)plugin->plugin_data;
   uint32_t magic = 0;
-  double vals[3] = {0, 0, 0};
+  double vals[12] = {0};
   if (!readAll(is, &magic, sizeof(magic)) || magic != kStateMagic) return false;
   if (!readAll(is, vals, sizeof(vals))) return false;
   self->p_time_ms.store(std::clamp(vals[0], kMinDelayMs, kMaxDelayMs));
   self->p_mix.store(std::clamp(vals[1], 0.0, 100.0));
   self->p_feedback.store(std::clamp(vals[2], 0.0, 100.0));
+  self->p_filter.store(std::clamp(vals[3], 0.0, (double)(kNumPresets - 1)));
+  for (int i = 0; i < 8; ++i)
+    self->p_tap[i].store(std::clamp(vals[4 + i], -128.0, 127.0));
+  self->recomputeFir();
   return true;
 }
 
@@ -460,7 +684,8 @@ static clap_process_status plug_process(const clap_plugin_t *plugin,
       if (h->time > cur) break;
       if (h->space_id == CLAP_CORE_EVENT_SPACE_ID &&
           h->type == CLAP_EVENT_PARAM_VALUE)
-        applyParamEvent(self, (const clap_event_param_value_t *)h);
+        applyParamEvent(self, (const clap_event_param_value_t *)h,
+                        process->out_events, h->time);
       ++ev_i;
     }
 
